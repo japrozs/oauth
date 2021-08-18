@@ -127,10 +127,7 @@ const main = async () => {
                 if (err) {
                     console.log(err.message);
                 }
-                const userDb = await User.findOne({
-                    where: { githubId: req.session.userId },
-                });
-                req.session.userId = userDb?.id;
+                req.session.userId = user.user.id;
                 res.json({ user: user.user });
             }
         )(req, res);
