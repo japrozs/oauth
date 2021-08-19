@@ -1,6 +1,6 @@
 import "reflect-metadata";
 import "dotenv-safe/config";
-import { __prod__, COOKIE_NAME } from "./constants";
+import { __prod__, COOKIE_NAME, COOKIE_SECRET } from "./constants";
 import express from "express";
 import { ApolloServer } from "apollo-server-express";
 import { buildSchema } from "type-graphql";
@@ -13,11 +13,13 @@ import { createConnection } from "typeorm";
 import { User } from "./entities/User";
 import passport from "passport";
 import { Strategy as GitHubStrategy } from "passport-github";
+import cookieParser from "cookie-parser";
+import cookieEncrypter from "cookie-encrypter";
 
 const main = async () => {
     const conn = await createConnection({
         type: "postgres",
-        database: "oauth",
+        database: "oauth-backend",
         username: "postgres",
         password: "postgres",
         logging: true,
@@ -49,10 +51,14 @@ const main = async () => {
                 secure: __prod__, // cookie only works in https
             },
             saveUninitialized: false,
-            secret: "qowiueojwojfalksdjoqiwueo",
+            secret: COOKIE_SECRET,
             resave: false,
         })
     );
+    app.use(cookieParser(COOKIE_SECRET));
+    app.use(cookieEncrypter(COOKIE_SECRET));
+    app.use(passport.initialize());
+    app.use(passport.session());
 
     const apolloServer = new ApolloServer({
         schema: await buildSchema({
@@ -67,7 +73,6 @@ const main = async () => {
         cors: false,
     });
 
-    app.use(passport.initialize());
     passport.serializeUser((user: any, done) => {
         done(null, user.githubId);
     });
@@ -83,7 +88,22 @@ const main = async () => {
                 let user = await User.findOne({
                     where: { githubId: profile.id },
                 });
-                if (user) {
+
+                if (user === undefined) {
+                    await User.create({
+                        name: profile.displayName,
+                        imgUrl: profile.photos
+                            ? profile.photos[0].value
+                            : "https://avatars.githubusercontent.com/u/57936?v=4",
+                        email: profile?.emails && profile?.emails[0]?.value,
+                        githubId: profile.id,
+                    }).save();
+
+                    const u = await User.findOne({
+                        where: { githubId: profile.id },
+                    });
+                    cb(null, u);
+                } else {
                     // user is in the database, update the info
                     user.name = profile.displayName;
                     user.imgUrl = profile.photos
@@ -93,19 +113,13 @@ const main = async () => {
 
                     // you can also use User.update()
                     await user.save();
-                } else {
-                    user = await User.create({
-                        name: profile.displayName,
-                        imgUrl: profile.photos
-                            ? profile.photos[0].value
-                            : "https://avatars.githubusercontent.com/u/57936?v=4",
-                        email: profile?.emails && profile?.emails[0]?.value,
-                        githubId: profile.id,
+
+                    const u = await User.findOne({
+                        where: { githubId: profile.id },
                     });
+                    console.log("userDb", u);
+                    cb(null, u);
                 }
-                cb(null, {
-                    user,
-                });
             }
         )
     );
@@ -117,31 +131,28 @@ const main = async () => {
         })
     );
 
-    app.get("/auth/github/callback", (req, res) => {
-        passport.authenticate(
-            "github",
-            {
-                session: false,
-            },
-            async (err: Error, user) => {
-                if (err) {
-                    console.log(err.message);
-                }
-                req.session.userId = user.user.id;
-                res.json({ user: user.user });
-            }
-        )(req, res);
-    });
+    app.get(
+        "/auth/github/callback",
+        passport.authenticate("github", {
+            session: false,
+        }),
+        async (req, res) => {
+            res.cookie(COOKIE_NAME, (req.user as User).id, {
+                maxAge: 1000 * 60 * 60 * 24 * 365 * 10, // 10 years
+                httpOnly: true,
+                sameSite: "lax", // csrf
+                secure: __prod__, // cookie only works in https
+            });
+            res.json({ user: req.user });
+        }
+    );
 
     app.get("/", async (req, res) => {
-        const user = await User.findOne(req.session.userId);
-        if (user) {
-            res.json({ user });
-        } else {
-            res.json({
-                message: "you are not authenticated!",
-            });
-        }
+        const { qid } = req.cookies;
+        console.log(qid);
+        const user = await User.findOne(qid);
+
+        res.json({ user });
     });
 
     app.listen(4000, () => {
